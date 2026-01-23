@@ -1,0 +1,32 @@
+name: Frieren Check
+
+on:
+  schedule:
+    # 毎週水曜日 日本時間9:00 (UTC 0:00)
+    - cron: '0 0 * * 3'
+  workflow_dispatch: # 手動実行用
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for Frieren in next issue
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          # ページを取得
+          HTML=$(curl -s "https://websunday.net/sunday/next/")
+
+          # content__main内を抽出してフリーレンを検索
+          CONTENT=$(echo "$HTML" | sed -n '/<div class="content__main">/,/<\/div>/p' | head -500)
+
+          if echo "$CONTENT" | grep -q "フリーレン"; then
+            echo "フリーレン found! Sending notification..."
+            curl -d "次号のサンデーにフリーレンが掲載されます！" \
+              -H "Title: フリーレン掲載通知" \
+              -H "Priority: high" \
+              -H "Tags: sparkles" \
+              "https://ntfy.sh/${NTFY_TOPIC}"
+          else
+            echo "フリーレン not found in next issue."
+          fi
