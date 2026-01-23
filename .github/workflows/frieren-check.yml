@@ -29,4 +29,9 @@ jobs:
               "https://ntfy.sh/${NTFY_TOPIC}"
           else
             echo "フリーレン not found in next issue."
+            curl -d "フリーレン連載なし" \
+              -H "Title: フリーレン掲載通知" \
+              -H "Priority: high" \
+              -H "Tags: sparkles" \
+              "https://ntfy.sh/${NTFY_TOPIC}"
           fi
