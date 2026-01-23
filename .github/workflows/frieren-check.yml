@@ -14,24 +14,39 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
-          # ページを取得
-          HTML=$(curl -s "https://websunday.net/sunday/next/")
+          pip install beautifulsoup4 requests
 
-          # content__main内を抽出してフリーレンを検索
-          CONTENT=$(echo "$HTML" | sed -n '/<div class="content__main">/,/<\/div>/p' | head -500)
+          python3 << 'EOF'
+          import requests
+          from bs4 import BeautifulSoup
+          import subprocess
+          import os
 
-          if echo "$CONTENT" | grep -q "シルバーマウンテン"; then
-            echo "フリーレン found! Sending notification..."
-            curl -d "次号のサンデーにフリーレンが掲載されます！" \
-              -H "Title: フリーレン掲載通知" \
-              -H "Priority: high" \
-              -H "Tags: sparkles" \
-              "https://ntfy.sh/${NTFY_TOPIC}"
-          else
-            echo "フリーレン not found in next issue."
-            curl -d "フリーレン連載なし" \
-              -H "Title: フリーレン掲載通知" \
-              -H "Priority: high" \
-              -H "Tags: sparkles" \
-              "https://ntfy.sh/${NTFY_TOPIC}"
-          fi
+          url = "https://websunday.net/sunday/next/"
+          response = requests.get(url)
+          response.encoding = response.apparent_encoding
+          soup = BeautifulSoup(response.text, "html.parser")
+
+          content_main = soup.find("div", class_="content__main")
+
+          topic = os.environ.get("NTFY_TOPIC")
+
+          if content_main and "フリーレン" in content_main.get_text():
+              print("フリーレン found!")
+              subprocess.run([
+                  "curl", "-d", "次号のサンデーにフリーレンが掲載されます！",
+                  "-H", "Title: フリーレン掲載あり",
+                  "-H", "Priority: high",
+                  "-H", "Tags: sparkles",
+                  f"https://ntfy.sh/{topic}"
+              ])
+          else:
+              print("フリーレン not found.")
+              subprocess.run([
+                  "curl", "-d", "次号のサンデーにフリーレンの掲載はありません",
+                  "-H", "Title: フリーレン掲載なし"
+                  "-H", "Priority: default",
+                  "-H", "Tags: eyes",
+                  f"https://ntfy.sh/{topic}"
+              ])
+          EOF
