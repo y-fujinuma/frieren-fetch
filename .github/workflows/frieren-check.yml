@@ -31,7 +31,7 @@ jobs:
 
           topic = os.environ.get("NTFY_TOPIC")
 
-          if content_main and "シルバーマウンテン" in content_main.get_text():
+          if content_main and "フリーレン" in content_main.get_text():
               print("フリーレン found!")
               subprocess.run([
                   "curl", "-d", "次号のサンデーにフリーレンが掲載されます！",
