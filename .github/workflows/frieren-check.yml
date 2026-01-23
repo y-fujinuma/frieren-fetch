@@ -20,7 +20,7 @@ jobs:
           # content__main内を抽出してフリーレンを検索
           CONTENT=$(echo "$HTML" | sed -n '/<div class="content__main">/,/<\/div>/p' | head -500)
 
-          if echo "$CONTENT" | grep -q "フリーレン"; then
+          if echo "$CONTENT" | grep -q "シルバーマウンテン"; then
             echo "フリーレン found! Sending notification..."
             curl -d "次号のサンデーにフリーレンが掲載されます！" \
               -H "Title: フリーレン掲載通知" \
