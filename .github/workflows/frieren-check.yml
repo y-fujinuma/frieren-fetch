@@ -2,8 +2,8 @@ name: Frieren Check
 
 on:
   schedule:
-    # 毎週水曜日 日本時間9:00 (UTC 0:00)
-    - cron: '*/5 * * * *'
+    # 毎週水曜日 日本時間 7:15（UTC 火曜日 22:15）
+    - cron: '15 22 * * 2'
   workflow_dispatch: # 手動実行用
 
 jobs:
