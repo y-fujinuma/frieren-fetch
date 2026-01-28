@@ -44,7 +44,7 @@ jobs:
               print("フリーレン not found.")
               subprocess.run([
                   "curl", "-d", "次号のサンデーにフリーレンの掲載はありません",
-                  "-H", "Title: フリーレン掲載なし"
+                  "-H", "Title: フリーレン掲載なし",
                   "-H", "Priority: default",
                   "-H", "Tags: eyes",
                   f"https://ntfy.sh/{topic}"
