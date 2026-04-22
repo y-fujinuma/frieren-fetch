@@ -1,0 +1,20 @@
+name: Keep Alive
+
+on:
+  schedule:
+    # 毎月1日 UTC 0:00 に実行（GitHubの60日非アクティブ無効化を防止）
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Re-enable scheduled workflows
+        run: |
+          gh workflow enable frieren-check.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
