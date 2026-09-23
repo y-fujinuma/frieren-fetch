@@ -2,19 +2,48 @@ name: Keep Alive
 
 on:
   schedule:
-    # 毎月1日 UTC 0:00 に実行（GitHubの60日非アクティブ無効化を防止）
-    - cron: '0 0 1 * *'
+    # 毎月1日 UTC 0:37。コミットを残し、両ワークフローの非アクティブ停止を防ぐ。
+    - cron: '37 0 1 * *'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/keepalive.yml'
   workflow_dispatch:
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
+      contents: write
       actions: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Record repository activity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > .github/keepalive
+          git add .github/keepalive
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: keep scheduled workflows active"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
       - name: Re-enable scheduled workflows
         run: |
           gh workflow enable frieren-check.yml
+          gh workflow enable keepalive.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run check after recovery
+        if: github.event_name != 'schedule'
+        run: gh workflow run frieren-check.yml --ref main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
