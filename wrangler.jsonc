@@ -5,5 +5,5 @@
   "compatibility_date": "2026-09-29",
   "workers_dev": true,
   "preview_urls": false,
-  "triggers": { "crons": ["15 22 * * 2"] }
+  "triggers": { "crons": ["15 22 * * TUE"] }
 }

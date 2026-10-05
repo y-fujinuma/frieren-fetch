@@ -1,6 +1,8 @@
 const SOURCE = 'https://websunday.net/sunday/next/';
 const TARGET = 'フリーレン';
 
+class SourceReadError extends Error {}
+
 // Text callbacks can split a word across network chunks or inline elements.
 export function createDetector() {
   let seen = false, nonempty = false, found = false, tail = '';
@@ -28,7 +30,13 @@ export async function detect(response) {
   const detector = createDetector();
   const parsed = new HTMLRewriter().on('div.content__main', detector).transform(response);
   // Drain the stream without storing the complete document.
-  await parsed.body.pipeTo(new WritableStream({ write() {} }));
+  try {
+    await parsed.body.pipeTo(new WritableStream({ write() {} }));
+  } catch {
+    // Headers may succeed before the source connection fails or times out.
+    throw new SourceReadError('Source body read failed');
+  }
+  // Content validation is deterministic and must not trigger another GET.
   return detector.result();
 }
 
@@ -46,30 +54,36 @@ export async function check(env, fetcher = fetch, parser = detect) {
   if (!env.NTFY_TOPIC || !/^[A-Za-z0-9_-]+$/.test(env.NTFY_TOPIC)) {
     throw new Error('NTFY_TOPIC is missing or invalid');
   }
-  let response;
+  let found;
   // Retry only source GETs. Retrying an ambiguous publish could duplicate notifications.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      response = await fetcher(SOURCE, { signal: AbortSignal.timeout(15000) });
-      if (response.ok) break;
-      const status = response.status;
-      await response.body?.cancel();
-      response = null;
-      if (status !== 429 && status < 500) throw new Error(`Source HTTP ${status}`);
-      if (attempt === 2) throw new Error(`Source HTTP ${status}`);
-    } catch (error) {
-      if (error.message?.startsWith('Source HTTP') || attempt === 2) {
+      let response;
+      try {
+        response = await fetcher(SOURCE, { signal: AbortSignal.timeout(15000) });
+      } catch {
+        throw new SourceReadError('Source connection failed');
+      }
+      if (!response.ok) {
+        const status = response.status;
+        // Cleanup must not mask the HTTP status if the body has already failed.
+        await response.body?.cancel().catch(() => {});
+        if (status === 429 || status >= 500) throw new SourceReadError(`Source HTTP ${status}`);
         throw new Error('Source request failed');
       }
+      if (!response.headers.get('content-type')?.includes('text/html')) {
+        await response.body?.cancel();
+        throw new Error('Source did not return HTML');
+      }
+      // Complete the streamed read inside the retry, with a fresh detector per attempt.
+      found = await parser(response);
+      break;
+    } catch (error) {
+      if (!(error instanceof SourceReadError)) throw error;
+      if (attempt === 2) throw new Error('Source request failed');
     }
     await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
   }
-  if (!response?.ok) throw new Error('Source request failed');
-  if (!response.headers.get('content-type')?.includes('text/html')) {
-    await response.body?.cancel();
-    throw new Error('Source did not return HTML');
-  }
-  const found = await parser(response);
   let published;
   try {
     published = await fetcher('https://ntfy.sh/', {

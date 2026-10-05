@@ -2,6 +2,8 @@
 
 週刊少年サンデーの次号ページを水曜07:15 JST（火曜22:15 UTC）に確認し、既存のntfyトピックへ日本語で通知します。GitHub Actionsから段階的に移行するコードです。
 
+Cronは `15 22 * * TUE` を使います。Cloudflareの曜日番号は1=日曜なので、GitHub Actionsの `2`（火曜）をそのまま移植しないでください。
+
 ## 構成と無料枠
 
 - Workers Cron Trigger ×1、通常は月4〜5回。外部リクエストは通常2回/実行、取得リトライ込み最大4回。
@@ -66,7 +68,7 @@ gh workflow disable frieren-check.yml --repo y-fujinuma/frieren-fetch
 
 ## エラーの扱い
 
-取得タイムアウト・429・5xx・通信障害には最大3回のGETを試行します。404等の恒久的エラーは再試行しません。HTML以外の応答、対象要素の欠落・空欄、ntfy送信失敗は実行エラーとなり、「掲載なし」を送信しません。送信結果が不明なPOSTは重複を避けるため自動再送しません。次の週まで待たず必要に応じて手動実行してください。
+取得タイムアウト・429・5xx・通信障害（応答本文の読み込み中断を含む）には最大3回のGETを試行します。404等の恒久的エラーは再試行しません。HTML以外の応答、対象要素の欠落・空欄、ntfy送信失敗は実行エラーとなり、「掲載なし」を送信しません。送信結果が不明なPOSTは重複を避けるため自動再送しません。次の週まで待たず必要に応じて手動実行してください。
 
 Scheduled invocationのエラーはCloudflareの実行履歴で確認してください。障害時の別経路アラートや自動再実行はこの最小構成には含まれていません。
 
@@ -77,10 +79,10 @@ npm test
 npm run dev
 # ローカルのsecretは .dev.vars に登録（gitignore対象）
 # 実トピックなら実際に通知されるためテスト用トピック推奨
-curl 'http://localhost:8787/__scheduled?cron=15+22+*+*+2'
+curl 'http://localhost:8787/__scheduled?cron=15+22+*+*+TUE'
 ```
 
-テストでは判定・チャンク境界・HTTP/通知失敗・認証ガードに加え、Miniflare/workerdのHTMLRewriterで実HTMLの解析も検証します。Wranglerのdry-runビルドも確認済みです。本番CPU計測・通信テストは公開後に必要です。
+テストでは判定・チャンク境界・HTTP/通知失敗・認証ガード・Cronの曜日/JST変換に加え、GET再試行の復旧/上限とPOST非再送を検証します。Miniflare/workerdのHTMLRewriterでは実HTMLの解析・本文中断・本文読み込み中のタイムアウト・再試行間の判定リセットも検証します。Wranglerのdry-runビルドも確認済みです。本番CPU計測・通信テストは公開後に必要です。
 
 ## ロールバック
 
