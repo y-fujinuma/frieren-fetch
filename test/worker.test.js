@@ -1,19 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import worker, { createDetector, check, notification } from '../src/worker.js';
+import worker, { findTarget, check, notification } from '../src/worker.js';
 
-test('detects a name split across text chunks', () => {
-  const d = createDetector(); d.element();
-  for (const text of ['次号にフリ', 'ー', 'レン掲載']) d.text({text});
-  assert.equal(d.result(), true);
+test('detects a name split across inline elements', () => {
+  assert.equal(findTarget('<div class="content__main">次号にフリ<span>ー</span>レン掲載</div>'), true);
 });
 test('missing or empty content is an error, not a negative notification', () => {
-  const d = createDetector(); assert.throws(() => d.result());
-  d.element(); d.text({text: ' \n '}); assert.throws(() => d.result());
+  assert.throws(() => findTarget('<div>フリーレン</div>'));
+  assert.throws(() => findTarget('<div class="content__main"> </div>'));
 });
 test('valid other content reports absence', () => {
-  const d = createDetector(); d.element(); d.text({text:'他作品'});
-  assert.equal(d.result(), false);
+  assert.equal(findTarget('<div class="content__main">他作品</div>'), false);
 });
 test('preserves Japanese notification and priority', () => {
   assert.equal(notification(true, 'test').priority, 4);

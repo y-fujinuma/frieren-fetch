@@ -103,3 +103,47 @@ test('Workers runtime retries interrupted bodies and never publishes partial res
     }
   } finally { await mf.dispose(); }
 });
+
+test('Workers fetch enforces decoded gzip size and never notifies on overflow', async () => {
+  const {createServer} = await import('node:http');
+  const {gzipSync} = await import('node:zlib');
+  const cap = 512 * 1024;
+  const valid = '<div class="content__main">他作品</div>';
+  let html = valid + ' '.repeat(cap - Buffer.byteLength(valid));
+  const server = createServer((_request, response) => {
+    const compressed = gzipSync(html);
+    assert.ok(compressed.byteLength < cap);
+    response.writeHead(200, {'Content-Type':'text/html; charset=UTF-8',
+      'Content-Encoding':'gzip', 'Content-Length':compressed.byteLength});
+    response.end(compressed);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = 'http://127.0.0.1:' + server.address().port + '/';
+  const source = await readFile(new URL('../src/worker.js', import.meta.url), 'utf8');
+  const mf = new Miniflare(convertV4MiniflareOptions({
+    modules:true, compatibilityDate:'2026-09-29',
+    script:source.replace('export default {', 'const worker = {') + `
+      export default {async fetch() {
+        let gets=0, posts=0;
+        try {
+          const result=await check({NTFY_TOPIC:'test-only'},async(url,options)=>{
+            if(url==='https://ntfy.sh/' && options.method==='POST'){posts++;return new Response('{}');}
+            if(url!=='https://websunday.net/sunday/next/' || options.method)throw new Error('Unexpected request');
+            gets++;return fetch(${JSON.stringify(origin)},options);
+          });
+          return Response.json({result,gets,posts});
+        }catch(error){return Response.json({error:error.message,gets,posts});}
+      }};
+    `,
+  }));
+  try {
+    const exact = await (await mf.dispatchFetch('https://test/')).json();
+    assert.deepEqual(exact, {result:{found:false,notified:true}, gets:1, posts:1});
+    html += ' ';
+    const over = await (await mf.dispatchFetch('https://test/')).json();
+    assert.deepEqual(over, {error:'Source exceeds 512 KiB', gets:1, posts:0});
+  } finally {
+    await mf.dispose();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
