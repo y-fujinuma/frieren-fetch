@@ -200,11 +200,15 @@ export function notification(found, topic) {
 }
 
 export async function check(env, fetcher = fetch, parser = detect, publishDelays = [3000, 8000]) {
-  if (!env.NTFY_TOPIC || !/^[A-Za-z0-9_-]+$/.test(env.NTFY_TOPIC)) {
-    throw new Error('NTFY_TOPIC is missing or invalid');
+  const validSecret = value => typeof value === 'string' && value.length > 0 && !/[^A-Za-z0-9_-]/.test(value);
+  const useNtfy = validSecret(env.NTFY_TOPIC);
+  const useBark = validSecret(env.BARK_KEY);
+  if (!useNtfy && !useBark) {
+    // Preserve the existing error for configurations without Bark.
+    throw new Error(env.BARK_KEY ? 'BARK_KEY is invalid; NTFY_TOPIC is missing or invalid' : 'NTFY_TOPIC is missing or invalid');
   }
   let found;
-  // Retry only source GETs. Retrying an ambiguous publish could duplicate notifications.
+  // Source retries are independent of the per-channel publish budgets.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       let response;
@@ -259,31 +263,73 @@ export async function check(env, fetcher = fetch, parser = detect, publishDelays
     'X-ID': `frieren-${jstDate}-${found ? 'found' : 'absent'}`,
   };
   if (env.NTFY_TOKEN) headers.Authorization = `Bearer ${env.NTFY_TOKEN}`;
-  const body = JSON.stringify(notification(found, env.NTFY_TOPIC));
+  const message = notification(found, env.NTFY_TOPIC);
+  const channels = {};
+  let lastError;
+  // Start both channels independently so an ntfy timeout cannot delay Bark.
+  await Promise.all([
+    ...(useNtfy ? ['ntfy'] : []),
+    ...(useBark ? ['bark'] : []),
+  ].map(async channel => {
+    try {
+      await publish(channel, env, message, headers, fetcher, publishDelays);
+      channels[channel] = true;
+    } catch (error) {
+      channels[channel] = false;
+      lastError = error;
+    }
+  }));
+  if (!Object.values(channels).some(Boolean)) throw lastError;
+  // Log only channel names/results, never keys, topics or response bodies.
+  console.log(JSON.stringify({ event: 'check_completed', found, channels }));
+  return { found, notified: true };
+}
+
+async function publish(channel, env, message, ntfyHeaders, fetcher, publishDelays) {
+  const bark = channel === 'bark';
+  const url = bark ? `https://api.day.app/${env.BARK_KEY}` : 'https://ntfy.sh/';
+  const headers = bark ? { 'Content-Type': 'application/json' } : ntfyHeaders;
+  const body = JSON.stringify(bark
+    ? { title: message.title, body: message.message, group: 'frieren-fetch' }
+    : message);
+  const label = bark ? 'Bark notification' : 'Notification';
   let notificationError;
   for (let attempt = 0; attempt <= publishDelays.length; attempt++) {
     if (attempt > 0) await new Promise(resolve => setTimeout(resolve, publishDelays[attempt - 1]));
     let published;
     try {
-      published = await fetcher('https://ntfy.sh/', {
+      published = await fetcher(url, {
         method: 'POST',
         headers,
         body,
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(bark ? 15000 : 30000),
       });
     } catch {
-      notificationError = new Error('Notification request failed');
+      notificationError = new Error(`${label} request failed`);
       continue;
     }
-    if (published.ok) {
+    if (bark && published.status === 200) {
+      let result;
+      try {
+        result = await published.json();
+      } catch (error) {
+        notificationError = new Error('Bark notification response failed');
+        // Invalid JSON is deterministic; interrupted body reads may recover.
+        if (error instanceof SyntaxError) break;
+        continue;
+      }
+      if (result?.code === 200) return;
+      // Do not include the response code/message: it may contain secrets.
+      notificationError = new Error('Bark notification rejected');
+      break;
+    }
+    if (!bark && published.ok) {
       await published.body?.cancel();
-      // Never log the topic or the ntfy response (both may contain the secret).
-      console.log(JSON.stringify({ event: 'check_completed', found }));
-      return { found, notified: true };
+      return;
     }
     const status = published.status;
     await published.body?.cancel().catch(() => {});
-    notificationError = new Error(`Notification HTTP ${status}`);
+    notificationError = new Error(`${label} HTTP ${status}`);
     // Other 4xx responses are permanent rejections; do not retry them.
     if (status !== 429 && status < 500) break;
   }
@@ -307,7 +353,7 @@ export default {
       return Response.json(await check(env));
     } catch (error) {
       // Error messages name the failing step and status only; they never
-      // contain the topic, the token, or a notification response body.
+      // contain the topic, the token, the Bark key, or a response body.
       console.error(JSON.stringify({ event: 'manual_check_failed', error: String(error && error.message || error) }));
       return Response.json({ error: 'Check failed' }, { status: 502 });
     }

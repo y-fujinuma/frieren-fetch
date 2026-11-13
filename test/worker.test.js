@@ -18,6 +18,162 @@ test('preserves Japanese notification and priority', () => {
 });
 const env = {NTFY_TOPIC:'test-only'};
 const html = () => new Response('<div>test</div>', {headers:{'Content-Type':'text/html; charset=utf-8'}});
+const barkEnv = {BARK_KEY:'test-Bark_key123'};
+
+test('Bark-only sends the same title/body without ntfy headers and uses a 15s timeout', async (t) => {
+  const timeouts = [];
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', ms => { timeouts.push(ms); return timeout(ms); });
+  for (const found of [true, false]) {
+    const calls = [];
+    const result = await check({...barkEnv, NTFY_TOKEN:'private-token'}, async (url, options) => {
+      calls.push({url, options});
+      return options.method === 'POST' ? Response.json({code:200}) : html();
+    }, async () => found);
+    assert.deepEqual(result, {found, notified:true});
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].url, `https://api.day.app/${barkEnv.BARK_KEY}`);
+    assert.deepEqual(calls[1].options.headers, {'Content-Type':'application/json'});
+    const message = notification(found);
+    assert.deepEqual(JSON.parse(calls[1].options.body), {
+      title:message.title, body:message.message, group:'frieren-fetch',
+    });
+  }
+  assert.deepEqual(timeouts, [15000, 15000, 15000, 15000]);
+});
+
+for (const body of [{code:400, message:'private-key'}, {code:'200'}, {}, null, 'invalid JSON']) {
+  test(`Bark rejects unsuccessful or invalid JSON: ${JSON.stringify(body)}`, async () => {
+    let posts = 0;
+    await assert.rejects(check(barkEnv, async (_url, options) => {
+      if (options.method !== 'POST') return html();
+      posts++;
+      return typeof body === 'string' ? new Response(body) : Response.json(body);
+    }, async () => true), /Bark notification (rejected|response failed)/);
+    assert.equal(posts, 1);
+  });
+}
+
+for (const failure of [429, 503, 'network', 'timeout', 'body']) {
+  test(`Bark ${failure} retries follow publishDelays`, async (t) => {
+    const delays = [];
+    t.mock.method(globalThis, 'setTimeout', (callback, ms) => { delays.push(ms); callback(); });
+    let posts = 0;
+    await assert.rejects(check(barkEnv, async (_url, options) => {
+      if (options.method !== 'POST') return html();
+      posts++;
+      if (failure === 'network') throw new TypeError('private-key');
+      if (failure === 'timeout') throw new DOMException('private-key', 'TimeoutError');
+      if (failure === 'body') return new Response(new ReadableStream({
+        start(controller) { controller.error(new TypeError('private-key')); },
+      }));
+      return new Response('', {status:failure});
+    }, async () => true, [1, 2, 3]), /Bark notification/);
+    assert.equal(posts, 4);
+    assert.deepEqual(delays, [1, 2, 3]);
+  });
+}
+
+for (const status of [201, 400, 401, 403]) {
+  test(`Bark HTTP ${status} is not success and is not retried`, async () => {
+    let posts = 0;
+    await assert.rejects(check(barkEnv, async (_url, options) => {
+      if (options.method !== 'POST') return html();
+      posts++;
+      return Response.json({code:200}, {status});
+    }, async () => false), new RegExp(`Bark notification HTTP ${status}`));
+    assert.equal(posts, 1);
+  });
+}
+
+test('Bark recovers on retry and stops after success', async (t) => {
+  const delays = [];
+  t.mock.method(globalThis, 'setTimeout', (callback, ms) => { delays.push(ms); callback(); });
+  let posts = 0;
+  assert.deepEqual(await check(barkEnv, async (_url, options) => {
+    if (options.method !== 'POST') return html();
+    return ++posts === 1 ? new Response('', {status:429}) : Response.json({code:200});
+  }, async () => false, [7, 9]), {found:false, notified:true});
+  assert.equal(posts, 2);
+  assert.deepEqual(delays, [7]);
+});
+
+for (const failed of ['ntfy', 'bark', 'neither', 'both']) {
+  test(`dual channels: ${failed} fail, with secret-free outcome logs`, async (t) => {
+    const logs = [];
+    t.mock.method(console, 'log', line => logs.push(line));
+    const calls = [];
+    const run = check({...env, ...barkEnv}, async (url, options) => {
+      if (options.method !== 'POST') return html();
+      const channel = url === 'https://ntfy.sh/' ? 'ntfy' : 'bark';
+      calls.push(channel);
+      if (failed === channel || failed === 'both') return new Response('', {status:400});
+      return Response.json({code:200});
+    }, async () => true);
+    if (failed === 'both') {
+      await assert.rejects(run, /Bark notification HTTP 400/);
+      assert.deepEqual(logs, []);
+    } else {
+      assert.deepEqual(await run, {found:true, notified:true});
+      assert.deepEqual(JSON.parse(logs[0]), {event:'check_completed', found:true,
+        channels:{ntfy:failed !== 'ntfy', bark:failed !== 'bark'}});
+      assert.ok(!logs[0].includes(env.NTFY_TOPIC));
+      assert.ok(!logs[0].includes(barkEnv.BARK_KEY));
+    }
+    assert.deepEqual(calls, ['ntfy', 'bark']);
+  });
+}
+
+test('dual-channel retries do not resend an already-successful channel', async (t) => {
+  const delays = [];
+  const posts = {ntfy:0, bark:0};
+  t.mock.method(globalThis, 'setTimeout', (callback, ms) => { delays.push(ms); callback(); });
+  const result = await check({...env, ...barkEnv}, async (url, options) => {
+    if (options.method !== 'POST') return html();
+    const channel = url === 'https://ntfy.sh/' ? 'ntfy' : 'bark';
+    posts[channel]++;
+    return channel === 'ntfy' ? new Response('', {status:429}) : Response.json({code:200});
+  }, async () => false, [3, 8]);
+  assert.deepEqual(result, {found:false, notified:true});
+  assert.deepEqual(posts, {ntfy:3, bark:1});
+  assert.deepEqual(delays, [3, 8]);
+});
+
+test('invalid channel secrets cannot make network calls when neither is valid', async () => {
+  for (const secrets of [{NTFY_TOPIC:'bad/topic'}, {BARK_KEY:'bad/key'},
+    {BARK_KEY:'bad key'}, {BARK_KEY:'日本語'}, {BARK_KEY:123}, {BARK_KEY:'key\n'}]) {
+    await assert.rejects(check(secrets, async () => assert.fail('unexpected network')), /missing or invalid|BARK_KEY is invalid/);
+  }
+});
+
+test('a valid channel works when the other secret is invalid', async () => {
+  for (const secrets of [{...barkEnv, NTFY_TOPIC:'bad/topic'}, {...env, BARK_KEY:'bad/key'}]) {
+    const posts = [];
+    await check(secrets, async (url, options) => {
+      if (options.method !== 'POST') return html();
+      posts.push(url);
+      return Response.json({code:200});
+    }, async () => true);
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0], secrets.BARK_KEY === barkEnv.BARK_KEY
+      ? `https://api.day.app/${barkEnv.BARK_KEY}` : 'https://ntfy.sh/');
+  }
+});
+
+test('scheduled handler applies the long publish budget to Bark', async (t) => {
+  const delays = [];
+  let posts = 0;
+  t.mock.method(globalThis, 'setTimeout', (callback, ms) => { delays.push(ms); callback(); });
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    if (options.method !== 'POST') return new Response('<div class="content__main">他作品</div>',
+      {headers:{'Content-Type':'text/html'}});
+    posts++;
+    return new Response('', {status:503});
+  });
+  await assert.rejects(worker.scheduled({}, barkEnv), /Bark notification HTTP 503/);
+  assert.equal(posts, 6);
+  assert.deepEqual(delays, [5000, 10000, 20000, 40000, 60000]);
+});
 test('publishes JSON to ntfy after successful parsing', async () => {
   const calls=[];
   const result=await check(env, async (url, options) => {
