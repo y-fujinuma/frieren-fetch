@@ -199,7 +199,7 @@ export function notification(found, topic) {
   };
 }
 
-export async function check(env, fetcher = fetch, parser = detect) {
+export async function check(env, fetcher = fetch, parser = detect, publishDelays = [3000, 8000]) {
   if (!env.NTFY_TOPIC || !/^[A-Za-z0-9_-]+$/.test(env.NTFY_TOPIC)) {
     throw new Error('NTFY_TOPIC is missing or invalid');
   }
@@ -233,23 +233,36 @@ export async function check(env, fetcher = fetch, parser = detect) {
     }
     await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
   }
-  // Publish with bounded retries. Worker requests leave through Cloudflare's
-  // shared egress IPs, and ntfy's anonymous per-IP daily quota frequently
-  // rejects them with HTTP 429 (verified live: "daily message quota reached")
-  // even though this Worker sends one message a week; other attempts fail
-  // with 5xx or network errors, while some succeed — slowly (a verified
-  // successful publish took ~19 s to respond), so the per-attempt timeout
-  // must be generous. A 429 means the message was not accepted, so retrying
-  // cannot duplicate it. For ambiguous failures every attempt resends the
-  // same X-ID, which ntfy uses to drop duplicates of an already-stored
-  // message. Setting NTFY_TOKEN (an ntfy.sh account access token) moves
-  // quota from the shared IP to the account.
-  const headers = { 'Content-Type': 'application/json', 'X-ID': crypto.randomUUID() };
+  // Publish with bounded retries. Two distinct problems affect publishes
+  // from Workers, both verified live:
+  // - ntfy's anonymous per-IP daily quota rejects some attempts with
+  //   HTTP 429 ("daily message quota reached") because Worker requests
+  //   leave through Cloudflare's shared egress IPs. Setting NTFY_TOKEN
+  //   (an ntfy.sh account access token) moves quota to the account.
+  // - ntfy.sh silently drops some Cloudflare egress IPs (fail2ban against
+  //   abuse from other Workers; see binwiederhier/ntfy issue #1832), so
+  //   other attempts hang until the Workers runtime reports HTTP 522
+  //   after ~19 s, or time out — while a successful publish can also be
+  //   slow (~19 s), hence the generous per-attempt timeout. Bans are
+  //   per-IP and rotating, so retries over minutes can land on a clean
+  //   egress IP; the scheduled handler passes a longer budget.
+  // A 429 means the message was not accepted, so retrying cannot
+  // duplicate it. For ambiguous failures every attempt resends the same
+  // X-ID, which ntfy uses to drop duplicates of an already-stored
+  // message. The ID is deterministic per JST date and result, so a
+  // manual run and the scheduled run on the same day cannot double-send.
+  const jstDate = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-ID': `frieren-${jstDate}-${found ? 'found' : 'absent'}`,
+  };
   if (env.NTFY_TOKEN) headers.Authorization = `Bearer ${env.NTFY_TOKEN}`;
   const body = JSON.stringify(notification(found, env.NTFY_TOPIC));
   let notificationError;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, [3000, 8000][attempt - 1]));
+  for (let attempt = 0; attempt <= publishDelays.length; attempt++) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, publishDelays[attempt - 1]));
     let published;
     try {
       published = await fetcher('https://ntfy.sh/', {
@@ -279,7 +292,10 @@ export async function check(env, fetcher = fetch, parser = detect) {
 
 export default {
   async scheduled(_event, env) {
-    await check(env); // Throw on error so Cloudflare records a failed invocation.
+    // A failed invocation is recorded by Cloudflare. The publish budget is
+    // longer here than for manual runs: spreading attempts over ~2 minutes
+    // of delays rides out ntfy.sh's rotating per-IP egress bans.
+    await check(env, fetch, detect, [5000, 10000, 20000, 40000, 60000]);
   },
   async fetch(request, env) {
     if (new URL(request.url).pathname !== '/run') return new Response('Not found', { status: 404 });

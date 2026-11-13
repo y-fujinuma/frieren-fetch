@@ -68,6 +68,29 @@ test('ntfy publish recovers after 429 and network failures, reusing one X-ID', a
   assert.ok(ids[0]);
   assert.deepEqual(ids,[ids[0],ids[0],ids[0]]);
 });
+test('X-ID is deterministic per JST date and result across separate runs', async () => {
+  const ids = [];
+  for (let run = 0; run < 2; run++) {
+    await check(env, async (_url, options) => {
+      if (options.method === 'POST') { ids.push(options.headers['X-ID']); return new Response('{}'); }
+      return html();
+    }, async () => false);
+  }
+  assert.equal(ids.length, 2);
+  assert.equal(ids[0], ids[1]);
+  assert.match(ids[0], /^frieren-\d{4}-\d{2}-\d{2}-absent$/);
+});
+test('scheduled-style publish budget retries over the given delays', async (t) => {
+  const delays = [];
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => { delays.push(delay); callback(); });
+  let posts = 0;
+  await assert.rejects(check(env, async (_url, options) => {
+    if (options.method === 'POST') { posts++; return new Response('',{status:522}); }
+    return html();
+  }, async () => true, [1, 2, 3]), /Notification HTTP 522/);
+  assert.equal(posts, 4);
+  assert.deepEqual(delays, [1, 2, 3]);
+});
 test('missing secret makes no network calls', async () => {
   await assert.rejects(check({},async()=>assert.fail('unexpected network')),/NTFY_TOPIC/);
 });
