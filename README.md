@@ -6,7 +6,7 @@ Cronは `15 22 * * TUE` を使います。Cloudflareの曜日番号は1=日曜�
 
 ## 構成と無料枠
 
-- Workers Cron Trigger ×1、通常は月4〜5回。外部リクエストは通常2回/実行、取得リトライ込み最大4回。
+- Workers Cron Trigger ×1、通常は月4〜5回。外部リクエストは通常2回/実行、リトライ込み最大7回（取得3回＋通知4回）。
 - 軽量なHTMLトークナイザで `div.content__main` のテキストから「フリーレン」を検索します。既存の検索範囲を維持するため、掲載の確定情報ではなくページ内のキーワード検出です。
 - KV、D1、Queues、有料プランは不要です。Freeプランで運用してください。
 - Workers Free: 100,000リクエスト/日、CPU 10ms/実行、Cronはアカウント全体で5個まで。他Workerと共有する上限にも注意してください。
@@ -32,6 +32,7 @@ npx wrangler secret put RUN_TOKEN
 
 - `NTFY_TOPIC`: 現在ntfyアプリで購読しているトピック名をWranglerの入力欄に登録します。GitHub Secretsから値を読み出すことはできません。チャットやコードに書かないでください。
 - `RUN_TOKEN`: パスワードマネージャーで生成した十分長いランダムな値を入力します。手動確認用のPOST `/run` を保護します。
+- `NTFY_TOKEN`（任意）: ntfy.shのアカウント用アクセストークン。設定すると通知のクォータが共有送信元IPではなくアカウントに紐づき、後述の429を根本的に避けられます。
 - 既に `frieren-fetch` というWorkerがある場合は、先に既存用途を確認し、必要なら両設定ファイルのnameを変更してください。
 
 ### 本番Workerの通知テスト
@@ -45,6 +46,15 @@ read -r -s -p 'RUN_TOKEN: ' FRIEREN_RUN_TOKEN
 printf '\n'
 printf 'header = "Authorization: Bearer %s"\n' "$FRIEREN_RUN_TOKEN" |
   curl --config - --fail-with-body --request POST "$FRIEREN_WORKER_URL/run"
+unset FRIEREN_RUN_TOKEN
+```
+
+macOSの標準シェル（zsh）では `read -p` が使えないため、次を使ってください。
+
+```zsh
+read -r -s 'FRIEREN_RUN_TOKEN?RUN_TOKEN: '; echo
+printf 'header = "Authorization: Bearer %s"\n' "$FRIEREN_RUN_TOKEN" |
+  curl --config - --fail-with-body --request POST 'https://<worker-url>/run'
 unset FRIEREN_RUN_TOKEN
 ```
 
@@ -68,7 +78,9 @@ gh workflow disable frieren-check.yml --repo y-fujinuma/frieren-fetch
 
 ## エラーの扱い
 
-取得タイムアウト・429・5xx・通信障害（応答本文の読み込み中断を含む）には最大3回のGETを試行します。404等の恒久的エラーは再試行しません。HTML以外の応答、対象要素の欠落・空欄、展開後512 KiBを超える本文、既知の未対応構文、ntfy送信失敗は実行エラーとなり、「掲載なし」を送信しません。送信結果が不明なPOSTは重複を避けるため自動再送しません。次の週まで待たず必要に応じて手動実行してください。
+取得タイムアウト・429・5xx・通信障害（応答本文の読み込み中断を含む）には最大3回のGETを試行します。404等の恒久的エラーは再試行しません。HTML以外の応答、対象要素の欠落・空欄、展開後512 KiBを超える本文、既知の未対応構文は実行エラーとなり、「掲載なし」を送信しません。
+
+ntfyへのPOSTは最大4回試行します。Workersの送信元はCloudflareの共有IPで、ntfy.shの匿名（IP単位）の日次クォータにより、週1通しか送らなくても429（daily message quota reached）で拒否されることが実測で確認できました。429は未受理を意味するので再送しても重複しません。結果が不明な失敗（通信障害・5xx）でも、実行ごとに固定の `X-ID` を付け直送し、ntfy側で重複を落とせるようにします。その他の4xxは恒久的な拒否として再試行しません。根本対策として、ntfy.shアカウントのアクセストークンをSecret `NTFY_TOKEN` に設定すると、クォータがアカウント単位になります。
 
 解析器はこの取得元向けのトークナイザで、完全なHTML5パーサではありません。コメント・引用符付き属性・通常のscript/style等を扱い、script本文内の `<!--`（文字列内も含む）、SVG/MathML内のCDATA、およびHTMLへ切り替わるforeignObject等の統合点は誤判定を避けるため実行エラーにします。これ以外の未対応HTMLをすべて検出できる保証はありません。取得元のマークアップ変更時は回帰テストを更新してください。
 
@@ -88,7 +100,7 @@ npm run dev
 curl 'http://localhost:8787/__scheduled?cron=15+22+*+*+TUE'
 ```
 
-テストでは判定・チャンク境界・HTTP/通知失敗・認証ガード・Cronの曜日/JST変換に加え、GET再試行の復旧/上限とPOST非再送を検証します。Miniflare/workerdでは実HTMLの解析・本文中断・本文読み込み中のタイムアウト・再試行間の判定リセットも検証します。Wranglerのdry-runビルドも確認済みです。本番CPU計測・通信テストは公開後に必要です。
+テストでは判定・チャンク境界・HTTP/通知失敗・認証ガード・Cronの曜日/JST変換に加え、GET再試行の復旧/上限と、POSTの再試行（429・通信障害・5xxは同一X-IDで最大4回、恒久4xxは1回）を検証します。Miniflare/workerdでは実HTMLの解析・本文中断・本文読み込み中のタイムアウト・再試行間の判定リセットも検証します。Wranglerのdry-runビルドも確認済みです。本番CPU計測・通信テストは公開後に必要です。
 
 ## ロールバック
 

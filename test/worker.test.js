@@ -38,10 +38,35 @@ test('wrong content type and parser failure do not publish', async () => {
   assert.equal(calls,1);
   await assert.rejects(check(env,async()=>html(),async()=>{throw new Error('missing');}));
 });
-test('ntfy HTTP failure is surfaced without retry', async () => {
+test('ntfy 429 is retried, then surfaced after four attempts', async (t) => {
+  const delays = [];
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => { delays.push(delay); callback(); });
   let calls=0;
   await assert.rejects(check(env,async()=>++calls===1 ? html() : new Response('',{status:429}),async()=>false),/Notification HTTP 429/);
-  assert.equal(calls,2);
+  assert.equal(calls,5);
+  assert.deepEqual(delays,[2000,5000,10000]);
+});
+test('ntfy permanent 4xx is not retried', async () => {
+  let posts=0;
+  await assert.rejects(check(env,async(_url,options)=>options.method==='POST' ? (posts++, new Response('',{status:400})) : html(),async()=>true),/Notification HTTP 400/);
+  assert.equal(posts,1);
+});
+test('ntfy publish recovers after 429 and network failures, reusing one X-ID', async (t) => {
+  t.mock.method(globalThis, 'setTimeout', (callback) => { callback(); });
+  const ids = [];
+  let posts=0;
+  const result = await check(env, async (_url, options) => {
+    if (options.method !== 'POST') return html();
+    posts++;
+    ids.push(options.headers['X-ID']);
+    if (posts === 1) return new Response('',{status:429});
+    if (posts === 2) throw new TypeError('connection reset after POST');
+    return new Response('{}');
+  }, async () => false);
+  assert.deepEqual(result,{found:false,notified:true});
+  assert.equal(posts,3);
+  assert.ok(ids[0]);
+  assert.deepEqual(ids,[ids[0],ids[0],ids[0]]);
 });
 test('missing secret makes no network calls', async () => {
   await assert.rejects(check({},async()=>assert.fail('unexpected network')),/NTFY_TOPIC/);
@@ -92,14 +117,17 @@ test('deterministic parser errors are not retried', async () => {
   assert.equal(gets, 1);
 });
 
-test('ambiguous notification network failure is never retried', async () => {
+test('ambiguous notification network failure is retried four times with one X-ID', async (t) => {
+  t.mock.method(globalThis, 'setTimeout', (callback) => { callback(); });
   let gets = 0, posts = 0;
+  const ids = new Set();
   await assert.rejects(check(env, async (_url, options) => {
-    if (options.method === 'POST') { posts++; throw new TypeError('connection reset after POST'); }
+    if (options.method === 'POST') { posts++; ids.add(options.headers['X-ID']); throw new TypeError('connection reset after POST'); }
     gets++; return html();
   }, async () => true), /Notification request failed/);
   assert.equal(gets, 1);
-  assert.equal(posts, 1);
+  assert.equal(posts, 4);
+  assert.equal(ids.size, 1);
 });
 
 test('an already-errored HTTP error body cannot suppress retry or change permanent status handling', async (t) => {

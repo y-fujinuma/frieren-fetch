@@ -233,26 +233,46 @@ export async function check(env, fetcher = fetch, parser = detect) {
     }
     await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
   }
-  let published;
-  try {
-    published = await fetcher('https://ntfy.sh/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(notification(found, env.NTFY_TOPIC)),
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch {
-    throw new Error('Notification request failed');
-  }
-  if (!published.ok) {
+  // Publish with bounded retries. Worker requests leave through Cloudflare's
+  // shared egress IPs, and ntfy's anonymous per-IP daily quota frequently
+  // rejects them with HTTP 429 (verified live: "daily message quota reached")
+  // even though this Worker sends one message a week; other attempts fail
+  // with 5xx or network errors, while some succeed. A 429 means the message
+  // was not accepted, so retrying cannot duplicate it. For ambiguous
+  // failures every attempt resends the same X-ID, which ntfy uses to drop
+  // duplicates of an already-stored message. Setting NTFY_TOKEN (an ntfy.sh
+  // account access token) moves quota from the shared IP to the account.
+  const headers = { 'Content-Type': 'application/json', 'X-ID': crypto.randomUUID() };
+  if (env.NTFY_TOKEN) headers.Authorization = `Bearer ${env.NTFY_TOKEN}`;
+  const body = JSON.stringify(notification(found, env.NTFY_TOPIC));
+  let notificationError;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, [2000, 5000, 10000][attempt - 1]));
+    let published;
+    try {
+      published = await fetcher('https://ntfy.sh/', {
+        method: 'POST',
+        headers,
+        body,
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch {
+      notificationError = new Error('Notification request failed');
+      continue;
+    }
+    if (published.ok) {
+      await published.body?.cancel();
+      // Never log the topic or the ntfy response (both may contain the secret).
+      console.log(JSON.stringify({ event: 'check_completed', found }));
+      return { found, notified: true };
+    }
     const status = published.status;
-    await published.body?.cancel();
-    throw new Error(`Notification HTTP ${status}`);
+    await published.body?.cancel().catch(() => {});
+    notificationError = new Error(`Notification HTTP ${status}`);
+    // Other 4xx responses are permanent rejections; do not retry them.
+    if (status !== 429 && status < 500) break;
   }
-  await published.body?.cancel();
-  // Never log the topic or the ntfy response (both may contain the secret).
-  console.log(JSON.stringify({ event: 'check_completed', found }));
-  return { found, notified: true };
+  throw notificationError;
 }
 
 export default {
