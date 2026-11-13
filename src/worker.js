@@ -254,7 +254,7 @@ export async function check(env, fetcher = fetch, parser = detect) {
         method: 'POST',
         headers,
         body,
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(15000),
       });
     } catch {
       notificationError = new Error('Notification request failed');
@@ -287,8 +287,10 @@ export default {
     }
     try {
       return Response.json(await check(env));
-    } catch {
-      console.error('Manual check failed; inspect source availability and secret settings');
+    } catch (error) {
+      // Error messages name the failing step and status only; they never
+      // contain the topic, the token, or a notification response body.
+      console.error(JSON.stringify({ event: 'manual_check_failed', error: String(error && error.message || error) }));
       return Response.json({ error: 'Check failed' }, { status: 502 });
     }
   },
