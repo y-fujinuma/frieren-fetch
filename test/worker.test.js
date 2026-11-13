@@ -38,13 +38,13 @@ test('wrong content type and parser failure do not publish', async () => {
   assert.equal(calls,1);
   await assert.rejects(check(env,async()=>html(),async()=>{throw new Error('missing');}));
 });
-test('ntfy 429 is retried, then surfaced after four attempts', async (t) => {
+test('ntfy 429 is retried, then surfaced after three attempts', async (t) => {
   const delays = [];
   t.mock.method(globalThis, 'setTimeout', (callback, delay) => { delays.push(delay); callback(); });
   let calls=0;
   await assert.rejects(check(env,async()=>++calls===1 ? html() : new Response('',{status:429}),async()=>false),/Notification HTTP 429/);
-  assert.equal(calls,5);
-  assert.deepEqual(delays,[2000,5000,10000]);
+  assert.equal(calls,4);
+  assert.deepEqual(delays,[3000,8000]);
 });
 test('ntfy permanent 4xx is not retried', async () => {
   let posts=0;
@@ -117,7 +117,7 @@ test('deterministic parser errors are not retried', async () => {
   assert.equal(gets, 1);
 });
 
-test('ambiguous notification network failure is retried four times with one X-ID', async (t) => {
+test('ambiguous notification network failure is retried three times with one X-ID', async (t) => {
   t.mock.method(globalThis, 'setTimeout', (callback) => { callback(); });
   let gets = 0, posts = 0;
   const ids = new Set();
@@ -126,7 +126,7 @@ test('ambiguous notification network failure is retried four times with one X-ID
     gets++; return html();
   }, async () => true), /Notification request failed/);
   assert.equal(gets, 1);
-  assert.equal(posts, 4);
+  assert.equal(posts, 3);
   assert.equal(ids.size, 1);
 });
 

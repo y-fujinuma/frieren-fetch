@@ -237,24 +237,26 @@ export async function check(env, fetcher = fetch, parser = detect) {
   // shared egress IPs, and ntfy's anonymous per-IP daily quota frequently
   // rejects them with HTTP 429 (verified live: "daily message quota reached")
   // even though this Worker sends one message a week; other attempts fail
-  // with 5xx or network errors, while some succeed. A 429 means the message
-  // was not accepted, so retrying cannot duplicate it. For ambiguous
-  // failures every attempt resends the same X-ID, which ntfy uses to drop
-  // duplicates of an already-stored message. Setting NTFY_TOKEN (an ntfy.sh
-  // account access token) moves quota from the shared IP to the account.
+  // with 5xx or network errors, while some succeed — slowly (a verified
+  // successful publish took ~19 s to respond), so the per-attempt timeout
+  // must be generous. A 429 means the message was not accepted, so retrying
+  // cannot duplicate it. For ambiguous failures every attempt resends the
+  // same X-ID, which ntfy uses to drop duplicates of an already-stored
+  // message. Setting NTFY_TOKEN (an ntfy.sh account access token) moves
+  // quota from the shared IP to the account.
   const headers = { 'Content-Type': 'application/json', 'X-ID': crypto.randomUUID() };
   if (env.NTFY_TOKEN) headers.Authorization = `Bearer ${env.NTFY_TOKEN}`;
   const body = JSON.stringify(notification(found, env.NTFY_TOPIC));
   let notificationError;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, [2000, 5000, 10000][attempt - 1]));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, [3000, 8000][attempt - 1]));
     let published;
     try {
       published = await fetcher('https://ntfy.sh/', {
         method: 'POST',
         headers,
         body,
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(30000),
       });
     } catch {
       notificationError = new Error('Notification request failed');
