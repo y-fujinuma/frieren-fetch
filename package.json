@@ -1,0 +1,15 @@
+{
+  "name": "frieren-fetch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "dev": "wrangler dev --test-scheduled",
+    "deploy:setup": "wrangler deploy --config wrangler.setup.jsonc",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "miniflare": "5.20260926.1-alpha",
+    "wrangler": "4.144.0"
+  }
+}
